@@ -11,7 +11,9 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use crate::event::ConversationId;
+use crate::Error;
+use crate::event::{ConversationId, Event};
+use crate::harness::{Shared, Update};
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -41,6 +43,8 @@ pub struct ToolOutput {
     pub is_error: bool,
     /// Data for user interfaces; the model never sees it.
     pub details: Option<Value>,
+    /// The result as data, for programs that call the tool with [`ToolContext::call_tool`]. Not stored.
+    pub structured: Option<Value>,
 }
 
 impl ToolOutput {
@@ -48,6 +52,14 @@ impl ToolOutput {
         ToolOutput {
             content: vec![Content::text(text)],
             ..ToolOutput::default()
+        }
+    }
+
+    /// A result that is data: the model reads it as JSON text, and programs calling the tool get the value.
+    pub fn json(value: Value) -> Self {
+        ToolOutput {
+            structured: Some(value.clone()),
+            ..ToolOutput::text(value.to_string())
         }
     }
 
@@ -78,7 +90,7 @@ impl From<&str> for ToolOutput {
     }
 }
 
-/// What a running call knows about itself.
+/// What a running call knows about itself, and what it may ask of the harness.
 #[derive(Clone)]
 pub struct ToolContext {
     pub conversation: ConversationId,
@@ -86,13 +98,54 @@ pub struct ToolContext {
     pub cwd: Option<PathBuf>,
     /// Cancelled when the call is aborted. Long-running tools should stop when it fires.
     pub cancel: CancellationToken,
-    pub(crate) progress: Arc<dyn Fn(&str) + Send + Sync>,
+    /// How often a crash cut this call off before this run of it. Above zero only for replay-safe tools.
+    pub restarts: u32,
+    pub(crate) shared: Arc<Shared>,
 }
 
 impl ToolContext {
     /// Shows running output to watchers. It is not stored and not part of the result.
     pub fn output(&self, text: &str) {
-        (self.progress)(text);
+        let update = Update::ToolOutput {
+            conversation: self.conversation.clone(),
+            call: self.call_id.clone(),
+            text: text.to_owned(),
+        };
+        self.shared.notify(&self.conversation, update);
+    }
+
+    /// Calls another registered tool, as a script or a bridge does. The call runs the tool hooks and returns its
+    /// result to the caller instead of the transcript.
+    pub async fn call_tool(&self, name: &str, arguments: JsonObject) -> ToolOutput {
+        crate::run::nested_call(self, name, arguments).await
+    }
+
+    /// Every registered tool, also those not offered to the model.
+    pub fn tool_specs(&self) -> Vec<ToolSpec> {
+        self.shared.tools.values().map(|tool| tool.spec().clone()).collect()
+    }
+
+    fn stored_key(&self, key: &str) -> String {
+        format!("call/{}/{key}", self.call_id)
+    }
+
+    /// Durably keeps a value for this call, so a replay-safe tool finds it again when it reruns after a crash.
+    /// `None` removes it. Everything a call stored is dropped when its result is stored.
+    pub fn store(&self, key: &str, value: Option<Value>) -> Result<(), Error> {
+        let event = Event::Value {
+            conversation: self.conversation.clone(),
+            key: self.stored_key(key),
+            value,
+        };
+        self.shared.commit(|_| Ok((vec![event], ())))
+    }
+
+    pub fn load(&self, key: &str) -> Option<Value> {
+        let key = self.stored_key(key);
+        self.shared
+            .read(&self.conversation, |state| state.values.get(&key).cloned())
+            .ok()
+            .flatten()
     }
 }
 

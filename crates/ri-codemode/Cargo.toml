@@ -1,0 +1,21 @@
+[package]
+name = "ri-codemode"
+description = "Code mode for ri-durable: the model writes JavaScript that calls tools as functions, in a QuickJS sandbox"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ri-ai.workspace = true
+ri-durable.workspace = true
+futures-util.workspace = true
+rquickjs = "0.14"
+schemars = "1"
+serde = { workspace = true }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+ri-pi.workspace = true
+tempfile.workspace = true

@@ -94,6 +94,13 @@ impl State {
                 call,
                 status,
             } => self.update(conversation, |state| {
+                if *status == CallStatus::Done {
+                    // What a call stored for its own reruns goes with the commit that stores its result.
+                    let (own, nested) = (format!("call/{call}/"), format!("call/{call}>"));
+                    state
+                        .values
+                        .retain(|key, _| !key.starts_with(&own) && !key.starts_with(&nested));
+                }
                 let calls = match &mut state.run {
                     Some(Run {
                         phase: Phase::Tools { calls },

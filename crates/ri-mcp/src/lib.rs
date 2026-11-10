@@ -258,10 +258,15 @@ pub fn tool_output(result: &Value) -> ToolOutput {
         (true, Some(structured)) if !structured.is_null() => vec![Content::text(limit_text(&structured.to_string()))],
         _ => content,
     };
+    let structured = result
+        .get("structuredContent")
+        .filter(|structured| !structured.is_null())
+        .cloned();
     ToolOutput {
         content,
         is_error: result["isError"].as_bool().unwrap_or(false),
         details: None,
+        structured,
     }
 }
 

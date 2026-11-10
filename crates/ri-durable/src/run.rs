@@ -20,6 +20,7 @@ use crate::event::{
 use crate::harness::{Shared, Update, end_events};
 use crate::state::ConversationState;
 use crate::tool::{BeforeTool, ToolCall, ToolContext, ToolOutput};
+use ri_ai::JsonObject;
 
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
 
@@ -381,16 +382,7 @@ async fn run_call(
         name: call.name.clone(),
         arguments: call.arguments.clone(),
     };
-    let decision = shared.hooks.iter().try_fold(seen.arguments.clone(), |arguments, hook| {
-        match hook.before_tool(&ToolCall {
-            arguments: arguments.clone(),
-            ..seen.clone()
-        }) {
-            BeforeTool::Continue => Ok(arguments),
-            BeforeTool::Rewrite(rewritten) => Ok(rewritten),
-            BeforeTool::Block(reason) => Err(reason),
-        }
-    });
+    let decision = before_tool(shared, &seen);
     // The intent is stored before the tool runs, so a crash mid-call is known to have happened.
     let running = Event::Call {
         conversation: conversation.clone(),
@@ -399,37 +391,21 @@ async fn run_call(
     };
     shared.commit(|_| Ok((vec![running], ())))?;
 
-    let output = match (decision, shared.tools.get(&call.name)) {
-        (Err(reason), _) => ToolOutput::error(reason),
-        (Ok(_), None) => ToolOutput::error(format!("Unknown tool: {}", call.name)),
-        (Ok(arguments), Some(tool)) => {
-            let progress = {
-                let (shared, conversation, call_id) = (shared.clone(), conversation.clone(), call.id.clone());
-                Arc::new(move |text: &str| {
-                    let update = Update::ToolOutput {
-                        conversation: conversation.clone(),
-                        call: call_id.clone(),
-                        text: text.to_owned(),
-                    };
-                    shared.notify(&conversation, update);
-                })
-            };
+    let output = match decision {
+        Err(reason) => ToolOutput::error(reason),
+        Ok(arguments) => {
             let context = ToolContext {
                 conversation: conversation.clone(),
                 call_id: call.id.clone(),
                 cwd,
                 cancel: cancel.child_token(),
-                progress,
+                restarts,
+                shared: shared.clone(),
             };
-            let work = AssertUnwindSafe(tool.call(arguments, context)).catch_unwind();
             tokio::select! {
                 // The abort that follows writes this call's result.
                 _ = cancel.cancelled() => return Ok(()),
-                finished = work => match finished {
-                    Ok(Ok(output)) => output,
-                    Ok(Err(message)) => ToolOutput::error(message),
-                    Err(_) => ToolOutput::error("The tool crashed while running this call."),
-                },
+                output = invoke(shared, &call.name, arguments, context) => output,
             }
         }
     };
@@ -467,4 +443,60 @@ async fn run_call(
         ];
         Ok((events, ()))
     })
+}
+
+/// Asks the hooks about a call. `Ok` carries the arguments to run it with, `Err` the reason it is blocked.
+fn before_tool(shared: &Shared, call: &ToolCall) -> Result<JsonObject, String> {
+    shared.hooks.iter().try_fold(call.arguments.clone(), |arguments, hook| {
+        match hook.before_tool(&ToolCall {
+            arguments: arguments.clone(),
+            ..call.clone()
+        }) {
+            BeforeTool::Continue => Ok(arguments),
+            BeforeTool::Rewrite(rewritten) => Ok(rewritten),
+            BeforeTool::Block(reason) => Err(reason),
+        }
+    })
+}
+
+/// Runs a registered tool. Failures of every kind become an error result.
+async fn invoke(shared: &Shared, name: &str, arguments: JsonObject, context: ToolContext) -> ToolOutput {
+    let Some(tool) = shared.tools.get(name) else {
+        return ToolOutput::error(format!("Unknown tool: {name}"));
+    };
+    match AssertUnwindSafe(tool.call(arguments, context)).catch_unwind().await {
+        Ok(Ok(output)) => output,
+        Ok(Err(message)) => ToolOutput::error(message),
+        Err(_) => ToolOutput::error("The tool crashed while running this call."),
+    }
+}
+
+/// A call one tool makes to another: hooks run as for the model's calls, the result goes to the caller.
+pub(crate) async fn nested_call(parent: &ToolContext, name: &str, arguments: JsonObject) -> ToolOutput {
+    let shared = &parent.shared;
+    let seen = ToolCall {
+        conversation: parent.conversation.clone(),
+        id: format!("{}>{name}", parent.call_id),
+        name: name.to_owned(),
+        arguments,
+    };
+    let output = match before_tool(shared, &seen) {
+        Err(reason) => ToolOutput::error(reason),
+        Ok(arguments) => {
+            let context = ToolContext {
+                call_id: seen.id.clone(),
+                cancel: parent.cancel.child_token(),
+                restarts: 0,
+                ..parent.clone()
+            };
+            tokio::select! {
+                _ = parent.cancel.cancelled() => ToolOutput::error("The call was aborted."),
+                output = invoke(shared, name, arguments, context) => output,
+            }
+        }
+    };
+    shared
+        .hooks
+        .iter()
+        .fold(output, |output, hook| hook.after_tool(&seen, output))
 }

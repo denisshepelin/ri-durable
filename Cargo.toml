@@ -13,6 +13,7 @@ ri-ai = { path = "crates/ri-ai" }
 ri-pi = { path = "crates/ri-pi" }
 ri-durable = { path = "crates/ri-durable" }
 ri-mcp = { path = "crates/ri-mcp" }
+ri-codemode = { path = "crates/ri-codemode" }
 base64 = "0.22"
 bytes = "1"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }

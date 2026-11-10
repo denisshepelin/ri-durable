@@ -12,6 +12,7 @@ and logins you already have in [pi](https://github.com/earendil-works/pi). An ap
 | `ri-pi` | Reads pi's agent directory (`~/.pi/agent`): `auth.json`, `models-store.json`, `models.json`, `settings.json`. Refreshes OAuth tokens under the lock pi uses. |
 | `ri-durable` | The harness: conversations, model turns and tool calls are committed before they are shown, and continue after a crash. |
 | `ri-mcp` | The MCP servers of pi's `mcp.json` (and a project's `.pi/mcp.json`) as harness tools named `mcp__<server>__<tool>`, over stdio or Streamable HTTP. |
+| `ri-codemode` | Code mode: the model writes JavaScript that calls the tools as functions, in a QuickJS sandbox, and a script continues after a restart. |
 
 ## One request
 
@@ -70,6 +71,25 @@ Servers that fail to start are listed in `mcp.failures()`; the others still work
 are in use: dropping it stops the server processes. HTTP servers work with static headers; servers that need an
 OAuth sign-in are not supported yet.
 
+## Code mode
+
+```rust
+let specs: Vec<_> = tools.iter().map(|tool| tool.spec().clone()).collect();
+let options = tools.into_iter().fold(options, Options::tool);
+let options = options.tool(ri_codemode::codemode_tool(&specs, Default::default()));
+```
+
+The `codemode` tool takes the body of an async JavaScript function. Scripts call tools with
+`await tools.<name>(args)`, and only what they print or return reaches the model. The tool's description lists
+the tools as TypeScript declarations within a budget; scripts find the rest with `searchTools()` and
+`describeTool()`. Offer the model just this tool with `AgentConfig { tools: Some(vec!["codemode".into()]), .. }`
+and it works through scripts only, which suits large tool sets such as an MCP server's.
+
+Scripts run in QuickJS with no host access other than the tools, under a time and a memory limit. A script survives
+a restart: randomness and the clock are deterministic, and every result is journaled before the script sees it, so
+the rerun gets the same results in the same order without the tools running again. A call that was in flight at
+the crash follows its tool's replay policy.
+
 ## Storage
 
 Sessions are append-only logs of events; a session's state is the fold of its events.
@@ -92,11 +112,12 @@ cargo run -p ri-pi --example tool_round
 cargo run -p ri-pi --example classify -- "The change works perfectly, thanks."
 cargo run -p ri-durable --example chat -- "What time is it?"
 cargo run -p ri-mcp --example mcp_tools -- --server browse
+cargo run -p ri-codemode --example codemode -- "Which city is warmest right now?"
 ```
 
 ## Not here yet
 
-Code mode (QuickJS), compaction and subagents are planned. The Anthropic and
+Compaction and subagents are planned. The Anthropic and
 Google wire protocols are not implemented, and only Codex logins can be refreshed; other expired OAuth logins ask
 you to run pi once.
 
