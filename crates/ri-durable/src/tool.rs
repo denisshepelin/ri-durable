@@ -12,8 +12,8 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::Error;
-use crate::event::{ConversationId, Event};
-use crate::harness::{Shared, Update};
+use crate::event::{AgentConfig, ConversationId, Event};
+use crate::harness::{Conversation, Shared, Update};
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -123,6 +123,29 @@ impl ToolContext {
     /// Every registered tool, also those not offered to the model.
     pub fn tool_specs(&self) -> Vec<ToolSpec> {
         self.shared.tools.values().map(|tool| tool.spec().clone()).collect()
+    }
+
+    /// What the calling conversation runs with, harness defaults applied.
+    pub fn agent(&self) -> Result<AgentConfig, Error> {
+        self.shared
+            .read(&self.conversation, |state| state.agent.or(&self.shared.defaults))
+    }
+
+    /// Creates a conversation whose parent is the calling one, for work this call delegates.
+    pub fn create_conversation(&self, agent: AgentConfig) -> Result<Conversation, Error> {
+        let id = uuid::Uuid::now_v7().to_string();
+        let created = Event::ConversationCreated {
+            conversation: id.clone(),
+            parent: Some(self.conversation.clone()),
+            agent,
+        };
+        self.shared.commit(|_| Ok((vec![created], ())))?;
+        Ok(Conversation::new(self.shared.clone(), id))
+    }
+
+    pub fn conversation(&self, id: &str) -> Option<Conversation> {
+        let known = self.shared.read(id, |_| ()).is_ok();
+        known.then(|| Conversation::new(self.shared.clone(), id.to_owned()))
     }
 
     fn stored_key(&self, key: &str) -> String {

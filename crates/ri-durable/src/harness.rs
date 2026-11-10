@@ -10,6 +10,7 @@ use tokio::runtime::{Handle, Runtime};
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
+use crate::compaction::{Compacted, Compaction};
 use crate::event::{
     AgentConfig, CallStatus, ConversationId, Entry, EntryId, EntryKind, Event, Outcome, Phase, Queued, Reason, Run,
     RunFailure, SubmissionId, WhenBusy,
@@ -30,6 +31,7 @@ pub struct Settings {
     pub restart_limit: u32,
     /// Continue unfinished work as soon as the session opens.
     pub resume: bool,
+    pub compaction: Compaction,
 }
 
 impl Default for Settings {
@@ -39,6 +41,7 @@ impl Default for Settings {
             retry_delay: Duration::from_secs(1),
             restart_limit: 5,
             resume: true,
+            compaction: Compaction::default(),
         }
     }
 }
@@ -282,6 +285,36 @@ impl Shared {
         drop(inner);
         self.version.send_modify(|version| *version += 1);
         true
+    }
+
+    /// Stops the conversation's work: a task driving it is told to stop, work nothing drives is ended here. The
+    /// conversations it started for delegated work are stopped with it.
+    pub fn abort(&self, conversation: &str) -> Result<(), Error> {
+        let (driven, children) = {
+            let inner = self.lock();
+            inner.check()?;
+            let children: Vec<ConversationId> = inner
+                .state
+                .conversations
+                .values()
+                .filter(|child| child.parent.as_deref() == Some(conversation))
+                .map(|child| child.id.clone())
+                .collect();
+            (
+                inner.active.get(conversation).map(|cancel| cancel.cancel()).is_some(),
+                children,
+            )
+        };
+        if !driven {
+            self.commit_in(conversation, |state| {
+                let failure = RunFailure {
+                    reason: Reason::Aborted,
+                    detail: None,
+                };
+                Ok((end_events(state, failure, "The tool call was aborted."), ()))
+            })?;
+        }
+        children.iter().try_for_each(|child| self.abort(child))
     }
 
     /// Takes the conversation away from its task after an abort, so new work gets a fresh one.
@@ -631,6 +664,10 @@ pub struct Conversation {
 }
 
 impl Conversation {
+    pub(crate) fn new(shared: Arc<Shared>, id: ConversationId) -> Self {
+        Conversation { shared, id }
+    }
+
     pub fn id(&self) -> &str {
         &self.id
     }
@@ -764,21 +801,7 @@ impl Conversation {
     /// Stops the conversation: queued inputs are withdrawn, running tool calls are cancelled, and the call
     /// returns once the conversation is idle.
     pub async fn abort(&self) -> Result<(), Error> {
-        let driven = {
-            let inner = self.shared.lock();
-            inner.check()?;
-            inner.active.get(&self.id).map(|cancel| cancel.cancel()).is_some()
-        };
-        if !driven {
-            // No task owns the work, so it is ended here.
-            self.shared.commit_in(&self.id, |state| {
-                let failure = RunFailure {
-                    reason: Reason::Aborted,
-                    detail: None,
-                };
-                Ok((end_events(state, failure, "The tool call was aborted."), ()))
-            })?;
-        }
+        self.shared.abort(&self.id)?;
         self.wait_idle().await
     }
 
@@ -808,6 +831,30 @@ impl Conversation {
 
     pub fn reset_blocking(&self, note: Option<String>) -> Result<(), Error> {
         block_on(self.reset(note))
+    }
+
+    /// Summarizes the older part of the context now, keeping the recent part verbatim. `instructions` tell the
+    /// summary what to pay attention to. Returns false when there was nothing older to summarize.
+    pub async fn compact(&self, instructions: Option<&str>) -> Result<bool, Error> {
+        let shared = &self.shared;
+        let agent = shared.read(&self.id, |state| state.agent.or(&shared.defaults))?;
+        let model = shared.models.model(agent.model.as_deref()).map_err(Error::Compaction)?;
+        let keep = shared.settings.compaction.keep_recent_tokens;
+        let cancel = CancellationToken::new();
+        // The summary request needs the harness's runtime, whatever thread asks for it.
+        let (shared, id, instructions) = (shared.clone(), self.id.clone(), instructions.map(str::to_owned));
+        let task = self.shared.runtime.spawn(async move {
+            crate::compaction::compact(&shared, &id, &model, instructions.as_deref(), keep, &cancel).await
+        });
+        match task.await.map_err(|error| Error::Compaction(error.to_string()))?? {
+            Compacted::Done => Ok(true),
+            Compacted::Nothing => Ok(false),
+            Compacted::Failed(detail) => Err(Error::Compaction(detail)),
+        }
+    }
+
+    pub fn compact_blocking(&self, instructions: Option<&str>) -> Result<bool, Error> {
+        block_on(self.compact(instructions))
     }
 
     /// Resolves once no run is working and nothing is queued.

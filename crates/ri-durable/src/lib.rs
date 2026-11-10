@@ -19,11 +19,13 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
+mod compaction;
 pub mod event;
 mod harness;
 mod run;
 pub mod state;
 pub mod storage;
+mod subagent;
 pub mod testing;
 pub mod tool;
 
@@ -33,6 +35,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, Thread};
 
+pub use compaction::Compaction;
 pub use event::{
     AgentConfig, Call, CallStatus, ConversationId, Entry, EntryId, EntryKind, Event, Outcome, Phase, Queued, Reason,
     Run, RunFailure, SubmissionId, WhenBusy,
@@ -42,6 +45,7 @@ pub use state::{ConversationState, State};
 #[cfg(feature = "sqlite")]
 pub use storage::SqliteStorage;
 pub use storage::{JsonlStorage, MemoryStorage, Storage, data_dir};
+pub use subagent::{SubagentOptions, subagent_tool};
 pub use tool::{
     BeforeTool, Hook, Replay, Tool, ToolCall, ToolContext, ToolOutput, ToolSpec, raw_tool, replay_safe, schema_of, tool,
 };
@@ -55,6 +59,8 @@ pub enum Error {
     Failed(String),
     #[error("unknown conversation")]
     UnknownConversation,
+    #[error("compaction failed: {0}")]
+    Compaction(String),
     #[error("the input was not answered: {:?}{}", .0.reason, .0.detail.as_ref().map(|detail| format!(" ({detail})")).unwrap_or_default())]
     Unanswered(RunFailure),
 }

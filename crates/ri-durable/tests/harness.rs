@@ -522,3 +522,184 @@ fn images_reach_the_model_as_content() {
         vec![Message::User { content: input.content }]
     );
 }
+
+#[test]
+fn manual_compaction_replaces_older_turns_with_a_summary() {
+    let models = ScriptedModels::new([
+        Reply::text("one"),
+        Reply::text("two"),
+        Reply::text("SUMMARY"),
+        Reply::text("three"),
+    ]);
+    let settings = Settings {
+        compaction: ri_durable::Compaction {
+            keep_recent_tokens: 0,
+            ..Default::default()
+        },
+        ..fast()
+    };
+    let harness = Harness::open(MemoryStorage::new(), Options::new(models.clone()).settings(settings)).unwrap();
+    let root = harness.root().unwrap();
+    root.submit("first").unwrap().answer_blocking().unwrap();
+    assert!(
+        !root.compact_blocking(None).unwrap(),
+        "a single turn has nothing older to summarize"
+    );
+    root.submit("second").unwrap().answer_blocking().unwrap();
+
+    assert!(root.compact_blocking(Some("the numbers")).unwrap());
+    root.submit("third").unwrap().answer_blocking().unwrap();
+
+    let requests = models.requests();
+    let summary_request = ri_ai::joined_text(
+        match &requests[2].messages[0] {
+            Message::User { content } => content,
+            _ => panic!(),
+        },
+        "",
+    );
+    assert!(summary_request.contains("User: first") && summary_request.contains("Assistant: one"));
+    assert!(
+        summary_request.contains("the numbers") && !summary_request.contains("User: second"),
+        "the newest turn stays verbatim"
+    );
+    let texts: Vec<String> = requests[3]
+        .messages
+        .iter()
+        .map(|message| match message {
+            Message::User { content } => ri_ai::joined_text(content, ""),
+            Message::Assistant(assistant) => assistant.text(),
+            _ => String::new(),
+        })
+        .collect();
+    assert!(texts[0].ends_with("SUMMARY"));
+    assert_eq!(&texts[1..], ["second", "two", "third"]);
+    assert_eq!(kinds(&root).len(), 7, "every entry is still stored");
+}
+
+#[test]
+fn a_context_that_no_longer_fits_is_compacted_before_the_request() {
+    let models =
+        ScriptedModels::new([Reply::text("one"), Reply::text("SUMMARY"), Reply::text("two")]).context_window(30);
+    let settings = Settings {
+        compaction: ri_durable::Compaction {
+            reserve_tokens: 0,
+            keep_recent_tokens: 1000,
+            ..Default::default()
+        },
+        ..fast()
+    };
+    let harness = Harness::open(MemoryStorage::new(), Options::new(models.clone()).settings(settings)).unwrap();
+    let root = harness.root().unwrap();
+    root.submit("first").unwrap().answer_blocking().unwrap();
+
+    root.submit("x".repeat(100)).unwrap().answer_blocking().unwrap();
+
+    assert!(kinds(&root).contains(&"compaction".to_owned()));
+    let last = models.requests().pop().unwrap();
+    assert_eq!(last.messages.len(), 2, "the summary and the new input");
+}
+
+#[test]
+fn a_context_overflow_error_compacts_and_sends_the_request_again() {
+    let overflow = Reply::Error(Some(400), "This model's maximum context length is 8192 tokens".into());
+    let models = ScriptedModels::new([Reply::text("one"), overflow, Reply::text("SUMMARY"), Reply::text("two")]);
+    let harness = open(&models, vec![]);
+    let root = harness.root().unwrap();
+    root.submit("first").unwrap().answer_blocking().unwrap();
+
+    assert_eq!(root.submit("second").unwrap().answer_blocking().unwrap().text(), "two");
+
+    assert_eq!(
+        kinds(&root),
+        [
+            "user:first",
+            "assistant:one",
+            "user:second",
+            "compaction",
+            "assistant:two"
+        ]
+    );
+}
+
+#[test]
+fn a_subagent_answers_in_a_child_conversation_of_its_own() {
+    let models = ScriptedModels::new([
+        Reply::call("subagent", json!({ "task": "Count the files" })),
+        Reply::call("echo", json!({ "text": "from the child" })),
+        Reply::text("42 files"),
+        Reply::text("There are 42 files."),
+    ]);
+    let subagent = ri_durable::subagent_tool(ri_durable::SubagentOptions {
+        instructions: Some("You are a helper.".into()),
+        ..Default::default()
+    });
+    let harness = open(&models, vec![echo(), subagent]);
+    let root = harness.root().unwrap();
+
+    assert_eq!(
+        root.submit("How many files?")
+            .unwrap()
+            .answer_blocking()
+            .unwrap()
+            .text(),
+        "There are 42 files."
+    );
+
+    assert_eq!(
+        kinds(&root),
+        [
+            "user:How many files?",
+            "calls",
+            "result:42 files",
+            "assistant:There are 42 files."
+        ]
+    );
+    let child = harness
+        .conversations()
+        .into_iter()
+        .find(|conversation| conversation.id() != root.id())
+        .unwrap();
+    let state = child.snapshot().unwrap();
+    assert_eq!(state.parent.as_deref(), Some(root.id()));
+    assert_eq!(
+        state.agent.tools,
+        Some(vec!["echo".to_owned()]),
+        "children get no subagents of their own"
+    );
+    assert_eq!(
+        kinds(&child),
+        [
+            "user:Count the files",
+            "calls",
+            "result:echo: from the child",
+            "assistant:42 files"
+        ]
+    );
+    let requests = models.requests();
+    assert_eq!(requests[1].system_prompt.as_deref(), Some("You are a helper."));
+    assert_eq!(
+        requests[1].messages,
+        vec![Message::user("Count the files")],
+        "the child sees only its task"
+    );
+}
+
+#[test]
+fn aborting_the_parent_aborts_its_subagent() {
+    let models = ScriptedModels::new([Reply::call("subagent", json!({ "task": "wait" })), Reply::Hang]);
+    let harness = open(&models, vec![ri_durable::subagent_tool(Default::default())]);
+    let root = harness.root().unwrap();
+    root.submit("go").unwrap();
+    wait_until("the child asks the model", || models.requests().len() == 2);
+
+    root.abort_blocking().unwrap();
+
+    let child = harness
+        .conversations()
+        .into_iter()
+        .find(|conversation| conversation.id() != root.id())
+        .unwrap();
+    wait_until("the child is idle", || !child.snapshot().unwrap().is_busy());
+    assert_eq!(child.snapshot().unwrap().failure.unwrap().reason, Reason::Aborted);
+}

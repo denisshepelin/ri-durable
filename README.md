@@ -59,6 +59,19 @@ While a run is working, further inputs wait in the inbox: a follow-up (the defau
 (`Input::text(..).steer()`) joins the running one after its current tool round. `abort()` stops a conversation,
 `reset()` starts a new context, hooks can block or rewrite tool calls and requests.
 
+## Long conversations and delegation
+
+**Compaction.** Before a request that would not fit the model's context window, the harness has the model
+summarize the older turns and stores the summary as an entry; from then on the model sees the summary and the
+recent turns verbatim, while every entry stays stored. A provider's context-overflow error triggers the same and
+the request is sent again. `conversation.compact(Some("keep the file names"))` does it on demand, and
+`Settings::compaction` sets the thresholds.
+
+**Subagents.** `subagent_tool(Default::default())` gives the model a tool that hands a self-contained task to a
+child conversation and returns its answer. The child has the parent's tools but none of its transcript, and
+optionally its own model and instructions. Aborting the parent aborts its children, and after a crash the call
+finds its child again and waits for the same answer.
+
 ## MCP servers
 
 ```rust
@@ -115,11 +128,12 @@ cargo run -p ri-mcp --example mcp_tools -- --server browse
 cargo run -p ri-codemode --example codemode -- "Which city is warmest right now?"
 ```
 
-## Not here yet
+## Not here
 
-Compaction and subagents are planned. The Anthropic and
-Google wire protocols are not implemented, and only Codex logins can be refreshed; other expired OAuth logins ask
-you to run pi once.
+Compared with pi-durable, this leaves out user-defined durable tasks, documents with history, forks, deferred
+commits, hot reload of extensions, and the browser and Cloudflare storage backends. The Anthropic and Google wire
+protocols are not implemented yet, only Codex logins can be refreshed (other expired OAuth logins ask you to run pi
+once), and MCP servers that need an OAuth sign-in are not supported.
 
 ## License
 

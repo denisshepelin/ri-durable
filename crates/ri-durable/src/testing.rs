@@ -36,6 +36,7 @@ impl Reply {
 pub struct ScriptedModels {
     replies: Arc<Mutex<VecDeque<Reply>>>,
     requests: Arc<Mutex<Vec<Context>>>,
+    context_window: Option<u64>,
 }
 
 impl ScriptedModels {
@@ -43,6 +44,12 @@ impl ScriptedModels {
         let models = ScriptedModels::default();
         models.push(replies);
         models
+    }
+
+    /// Gives the scripted model a context window of this many tokens.
+    pub fn context_window(mut self, tokens: u64) -> Self {
+        self.context_window = Some(tokens);
+        self
     }
 
     /// Adds replies after the ones still waiting.
@@ -65,7 +72,13 @@ impl Models for ScriptedModels {
     fn model(&self, reference: Option<&str>) -> Result<Model, String> {
         match reference {
             Some("missing/model") => Err("unknown model `missing/model`".to_owned()),
-            _ => Ok(scripted_model()),
+            _ => {
+                let model = scripted_model();
+                Ok(Model {
+                    context_window: self.context_window.unwrap_or(model.context_window),
+                    ..model
+                })
+            }
         }
     }
 

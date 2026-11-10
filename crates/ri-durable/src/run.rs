@@ -13,6 +13,7 @@ use ri_ai::{
 use tokio_util::sync::CancellationToken;
 
 use crate::Error;
+use crate::compaction::{self, Compacted};
 use crate::event::{
     Call, CallStatus, ConversationId, Entry, EntryId, EntryKind, Event, Outcome, Phase, Reason, Run, RunFailure,
     WhenBusy,
@@ -135,13 +136,29 @@ async fn request(
     attempt: u32,
     cancel: &CancellationToken,
 ) -> Result<(), Error> {
-    let (agent, messages) = shared.read(conversation, |state| {
-        (state.agent.or(&shared.defaults), state.context())
-    })?;
+    let agent = shared.read(conversation, |state| state.agent.or(&shared.defaults))?;
     let model = match shared.models.model(agent.model.as_deref()) {
         Ok(model) => model,
         Err(detail) => return fail(shared, conversation, Reason::NoModel, Some(detail)),
     };
+    let policy = &shared.settings.compaction;
+    let used = shared.read(conversation, compaction::context_tokens)?;
+    if policy.enabled && used + policy.reserve_tokens > model.context_window {
+        let keep = policy.keep_recent_tokens.min(model.context_window / 2);
+        if let Compacted::Failed(detail) = compaction::compact(shared, conversation, &model, None, keep, cancel).await?
+        {
+            if cancel.is_cancelled() {
+                return Ok(());
+            }
+            return fail(
+                shared,
+                conversation,
+                Reason::ModelError,
+                Some(format!("Compaction failed: {detail}")),
+            );
+        }
+    }
+    let messages = shared.read(conversation, ConversationState::context)?;
     let offered = |name: &String| agent.tools.as_ref().is_none_or(|enabled| enabled.contains(name));
     let tools = shared
         .tools
@@ -190,6 +207,14 @@ async fn request(
 
     if matches!(message.stop_reason, StopReason::Error | StopReason::Aborted) {
         let detail = message.error_message.clone();
+        if detail.as_deref().is_some_and(compaction::is_context_overflow) {
+            // The provider says the context is too long: shrink it and send the request again.
+            let keep = policy.keep_recent_tokens.min(model.context_window / 4);
+            return match compaction::compact(shared, conversation, &model, None, keep, cancel).await? {
+                Compacted::Done => Ok(()),
+                _ => fail(shared, conversation, Reason::ModelError, detail),
+            };
+        }
         if !is_retryable(&message) || attempt >= shared.settings.max_retries {
             return fail(shared, conversation, Reason::ModelError, detail);
         }
