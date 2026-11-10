@@ -11,6 +11,7 @@ and logins you already have in [pi](https://github.com/earendil-works/pi). An ap
 | `ri-ai` | Provider-neutral messages, models and usage. Streams responses over the OpenAI Completions, OpenAI Responses and ChatGPT Codex protocols, and asks classifier models (TypeSafe System One, OpenAI Decisions) typed questions. |
 | `ri-pi` | Reads pi's agent directory (`~/.pi/agent`): `auth.json`, `models-store.json`, `models.json`, `settings.json`. Refreshes OAuth tokens under the lock pi uses. |
 | `ri-durable` | The harness: conversations, model turns and tool calls are committed before they are shown, and continue after a crash. |
+| `ri-mcp` | The MCP servers of pi's `mcp.json` (and a project's `.pi/mcp.json`) as harness tools named `mcp__<server>__<tool>`, over stdio or Streamable HTTP. |
 
 ## One request
 
@@ -57,6 +58,18 @@ While a run is working, further inputs wait in the inbox: a follow-up (the defau
 (`Input::text(..).steer()`) joins the running one after its current tool round. `abort()` stops a conversation,
 `reset()` starts a new context, hooks can block or rewrite tool calls and requests.
 
+## MCP servers
+
+```rust
+let servers = ri_mcp::config::load(&ri_pi::agent_dir(), None)?;
+let mcp = ri_mcp::Mcp::connect(servers, Default::default());
+let options = mcp.tools().into_iter().fold(Options::new(ri_pi::Pi::load()?), Options::tool);
+```
+
+Servers that fail to start are listed in `mcp.failures()`; the others still work. Keep `mcp` alive while its tools
+are in use: dropping it stops the server processes. HTTP servers work with static headers; servers that need an
+OAuth sign-in are not supported yet.
+
 ## Storage
 
 Sessions are append-only logs of events; a session's state is the fold of its events.
@@ -78,11 +91,12 @@ cargo run -p ri-pi --example ask -- --models
 cargo run -p ri-pi --example tool_round
 cargo run -p ri-pi --example classify -- "The change works perfectly, thanks."
 cargo run -p ri-durable --example chat -- "What time is it?"
+cargo run -p ri-mcp --example mcp_tools -- --server browse
 ```
 
 ## Not here yet
 
-MCP servers from pi's `mcp.json`, code mode (QuickJS), compaction and subagents are planned. The Anthropic and
+Code mode (QuickJS), compaction and subagents are planned. The Anthropic and
 Google wire protocols are not implemented, and only Codex logins can be refreshed; other expired OAuth logins ask
 you to run pi once.
 

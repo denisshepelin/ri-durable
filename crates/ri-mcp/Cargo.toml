@@ -1,0 +1,21 @@
+[package]
+name = "ri-mcp"
+description = "MCP servers from pi's mcp.json as ri-durable tools"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ri-ai.workspace = true
+ri-durable.workspace = true
+ri-pi.workspace = true
+futures-util.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "io-util"] }
+
+[dev-dependencies]
+tempfile.workspace = true
