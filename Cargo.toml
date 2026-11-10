@@ -11,6 +11,7 @@ rust-version = "1.99"
 [workspace.dependencies]
 ri-ai = { path = "crates/ri-ai" }
 ri-pi = { path = "crates/ri-pi" }
+ri-durable = { path = "crates/ri-durable" }
 base64 = "0.22"
 bytes = "1"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }

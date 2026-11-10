@@ -4,6 +4,7 @@
 pub mod api;
 pub mod classify;
 pub mod model;
+pub mod models;
 pub mod sse;
 pub mod stream;
 pub mod types;
@@ -11,6 +12,7 @@ pub mod types;
 use std::collections::BTreeMap;
 
 pub use model::{CostTier, Model, ModelCost, ModelKind};
+pub use models::{EventStream, Models};
 pub use stream::{HttpRequest, StreamOptions, stream};
 pub use types::*;
 

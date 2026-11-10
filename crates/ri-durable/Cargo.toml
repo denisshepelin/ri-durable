@@ -1,0 +1,27 @@
+[package]
+name = "ri-durable"
+description = "A durable agent harness: conversations, model turns and tool calls are committed before they are shown"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+rust-version.workspace = true
+
+[features]
+# Stores sessions in a SQLite database instead of a JSONL file.
+sqlite = ["dep:rusqlite"]
+
+[dependencies]
+rusqlite = { version = "0.41", features = ["bundled"], optional = true }
+ri-ai.workspace = true
+futures-util.workspace = true
+schemars = "1"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
+tokio-util = "0.7"
+uuid = { version = "1", features = ["v7"] }
+
+[dev-dependencies]
+ri-pi.workspace = true
+tempfile.workspace = true

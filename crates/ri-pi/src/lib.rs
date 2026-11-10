@@ -9,7 +9,10 @@ pub mod lock;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use ri_ai::{Auth, Model, ThinkingLevel};
+use futures_util::{StreamExt, stream};
+use ri_ai::{
+    AssistantEvent, AssistantMessage, Auth, Context, EventStream, Model, Models, StreamOptions, ThinkingLevel,
+};
 use serde_json::Value;
 
 pub use auth::{AuthStore, Credential, OAuthCredential};
@@ -218,6 +221,30 @@ impl Pi {
             .filter(|key| !key.is_empty())
             .map(Auth::api_key)
             .ok_or_else(|| Error::NoCredential(provider.to_owned()))
+    }
+}
+
+impl Models for Pi {
+    fn model(&self, reference: Option<&str>) -> Result<Model, String> {
+        let model = match reference {
+            Some(reference) => Pi::model(self, reference),
+            None => self.default_model(),
+        };
+        model.cloned().map_err(|error| error.to_string())
+    }
+
+    fn stream(&self, model: &Model, context: Context, options: StreamOptions) -> EventStream {
+        let (pi, model) = (self.clone(), model.clone());
+        let started = async move {
+            match pi.auth(&model).await {
+                Ok(auth) => ri_ai::stream(&pi.client, &model, &context, &options, &auth).boxed(),
+                Err(error) => {
+                    let failed = AssistantMessage::failed(&model, error.to_string(), None);
+                    stream::iter([AssistantEvent::Done(failed)]).boxed()
+                }
+            }
+        };
+        stream::once(started).flatten().boxed()
     }
 }
 
